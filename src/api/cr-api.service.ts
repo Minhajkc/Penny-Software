@@ -15,7 +15,7 @@ import { details as fixtureDetails, summaries as fixtureSummaries } from './fixt
 export class CrApiService {
 	private detailStore: Record<string, CrDetail> = JSON.parse(JSON.stringify(fixtureDetails));
 	/** Set > 0 to simulate network latency (ms). */
-	latencyMs = 0;
+	latencyMs = 1000;
 	/** When true, the NEXT call rejects with a network error, then resets. */
 	failNext = false;
 

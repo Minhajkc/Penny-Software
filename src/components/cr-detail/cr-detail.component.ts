@@ -1,9 +1,9 @@
-import { Component, Input, OnInit } from '@angular/core';
+import { Component, Input, OnInit, Output, EventEmitter,SimpleChanges,OnChanges } from '@angular/core';
 import { CommonModule } from '@angular/common';
-import { FormControl, ReactiveFormsModule } from '@angular/forms';
+import { FormControl, ReactiveFormsModule, Validators } from '@angular/forms';
 import { CrApiService } from '../../api/cr-api.service';
 import { SessionService } from '../../session/session.service';
-import { CrDetail, TimelineEntry } from '../../models/cr.models';
+import { CrDetail, CrSummary, TimelineEntry } from '../../models/cr.models';
 import { idle, loading, ViewState } from '../../common/view-state';
 import { computeDiff, DiffRow } from '../diff.util';
 import { formatMoney } from '../../common/money.util';
@@ -20,20 +20,31 @@ import { canApprovePolicy } from '../../common/permissions';
 	imports: [CommonModule, ReactiveFormsModule],
 	templateUrl: './cr-detail.component.html',
 })
-export class CrDetailComponent implements OnInit {
+export class CrDetailComponent implements OnInit, OnChanges {
 	@Input() id!: string;
+	@Output() crUpdated = new EventEmitter<CrSummary>();
 
 	state: ViewState<CrDetail> = idle();
 	submitting = false;
 	actionError?: string;
 	// TODO: add validation so the form is invalid until a reason is entered.
-	rejectControl = new FormControl('', { nonNullable: true });
+	rejectControl = new FormControl('', {
+		nonNullable: true,
+		validators: [Validators.required, Validators.pattern(/\S+/)]
+	});
 
-	constructor(private readonly api: CrApiService, private readonly session: SessionService) {}
+
+	constructor(private readonly api: CrApiService, private readonly session: SessionService) { }
 
 	ngOnInit(): void {
 		void this.load();
 	}
+
+	ngOnChanges(changes: SimpleChanges): void {
+	if (changes['id'] && !changes['id'].firstChange) {
+		void this.load();
+	}
+}
 
 	async load(): Promise<void> {
 		this.state = loading();
@@ -58,33 +69,117 @@ export class CrDetailComponent implements OnInit {
 	get timeline(): TimelineEntry[] {
 		// TODO: return the audit entries ordered chronologically (oldest first).
 		return [...(this.detail?.audit ?? [])]
-  .sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
+			.sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
 	}
 
 	/** Whether the current user may approve the loaded CR. */
 	get canApprove(): boolean {
 		// NOTE: this only looks at the CR status. The UI must also respect the user's permissions.
-		const a = this.detail?.status === 'PENDING_APPROVAL' && canApprovePolicy(this.session.user);
-		console.log(a,'approve')
-		return a
+			return (
+			!this.submitting &&
+			this.detail?.status === 'PENDING_APPROVAL' &&
+			canApprovePolicy(this.session.user)
+		);
 	}
 
 	get canReject(): boolean {
-		return this.detail?.status === 'PENDING_APPROVAL';
+		return (
+			!this.submitting &&
+			this.detail?.status === 'PENDING_APPROVAL' &&
+			canApprovePolicy(this.session.user)
+		);
 	}
 
 	fmt(amount: number): string {
 		return this.detail ? formatMoney(amount, this.detail.currency) : String(amount);
 	}
 
+	private toSummary(detail: CrDetail): CrSummary {
+		return {
+			id: detail.id,
+			title: detail.title,
+			status: detail.status,
+			orgCode: detail.orgCode,
+			delta: detail.delta,
+			currency: detail.currency,
+			updatedAt: detail.updatedAt,
+		};
+	}
+
 	async approve(): Promise<void> {
-		// TODO: perform the approve action through the API and reflect the outcome in the view.
-		throw new Error('approve() not implemented');
+		if (!this.canApprove || !this.detail) {
+			return;
+		}
+
+		this.submitting = true;
+		this.actionError = undefined;
+
+		try {
+			const updated = await this.api.approve(
+				this.session.user,
+				this.detail.id,
+				new Date().toISOString()
+			);
+
+			// Update the detail screen immediately.
+			this.state = {
+				status: 'loaded',
+				data: updated,
+			};
+
+			// Tell the parent/list that this CR changed.
+			this.crUpdated.emit(this.toSummary(updated));
+		} catch (err) {
+			// Keep the existing CR visible.
+			this.actionError = (err as Error).message;
+		} finally {
+			this.submitting = false;
+		}
 	}
 
 	async reject(): Promise<void> {
-		// TODO: require a valid rejectControl, then perform the reject action through the API and
-		//       reflect the outcome in the view.
-		throw new Error('reject() not implemented');
+		if (!this.canReject || !this.detail) {
+			return;
+		}
+
+		this.rejectControl.markAsTouched();
+
+		const reason = this.rejectControl.value.trim();
+
+		if (!reason) {
+			this.rejectControl.setErrors({
+				required: true,
+			});
+			return;
+		}
+
+		this.submitting = true;
+		this.actionError = undefined;
+
+		try {
+			const updated = await this.api.reject(
+				this.session.user,
+				this.detail.id,
+				new Date().toISOString(),
+				reason
+			);
+
+			// Update the detail screen immediately.
+			this.state = {
+				status: 'loaded',
+				data: updated,
+			};
+
+			// Tell the parent/list that this CR changed.
+			this.crUpdated.emit(this.toSummary(updated));
+
+			// Clear the rejection reason after success.
+			this.rejectControl.reset();
+		} catch (err) {
+			// Keep the existing CR visible.
+			this.actionError = (err as Error).message;
+		} finally {
+			this.submitting = false;
+		}
 	}
 }
